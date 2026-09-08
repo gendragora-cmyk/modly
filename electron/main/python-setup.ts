@@ -76,6 +76,41 @@ export function getVenvPythonExe(userData: string): string {
 
 // ─── Setup state ──────────────────────────────────────────────────────────────
 
+/**
+ * A venv's python.exe on Windows is only a thin launcher stub — it reads
+ * pyvenv.cfg to find its "home" (the base interpreter it was created from).
+ * If that base interpreter has moved, been deleted, or lived on a drive that
+ * is no longer present (e.g. an ejected USB/removable disk), the exe file
+ * still exists on disk but can no longer run at all. A plain existsSync()
+ * check can't tell the difference, so a dead venv like that looks "fine"
+ * forever and every future launch fails the same way. Actually invoking the
+ * interpreter (cheaply, with --version) is the only reliable way to know.
+ */
+function venvInterpreterWorks(pythonExe: string): boolean {
+  if (!existsSync(pythonExe)) return false
+  try {
+    execSync(`"${pythonExe}" --version`, { stdio: 'ignore', timeout: 5000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Quick check that uvicorn (the one package whose absence we've actually
+ * seen break startup — e.g. after an interrupted or antivirus-disrupted
+ * pip install) is importable in the venv. Cheap enough to run on every
+ * launch alongside the interpreter check.
+ */
+function venvHasRequiredPackages(pythonExe: string): boolean {
+  try {
+    execSync(`"${pythonExe}" -c "import uvicorn, fastapi"`, { stdio: 'ignore', timeout: 8000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function checkSetupNeeded(userData: string): boolean {
   const jsonPath = join(userData, 'python_setup.json')
   if (!existsSync(jsonPath)) return true
@@ -86,7 +121,9 @@ export function checkSetupNeeded(userData: string): boolean {
   } catch {
     return true
   }
-  if (!existsSync(getVenvPythonExe(userData))) return true
+  const venvPython = getVenvPythonExe(userData)
+  if (!venvInterpreterWorks(venvPython)) return true
+  if (!venvHasRequiredPackages(venvPython)) return true
   return false
 }
 
