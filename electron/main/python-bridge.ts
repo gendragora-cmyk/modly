@@ -17,6 +17,19 @@ export class PythonBridge {
   private startPromise: Promise<void> | null = null
   private getWindow: (() => BrowserWindow | null) | null = null
   private intentionalStop = false
+  // Rolling buffer of the most recent stderr lines from the Python process.
+  // Used to surface the *real* failure reason (e.g. "No module named uvicorn",
+  // "No Python at ...") in the UI instead of a generic exit message.
+  private recentStderr: string[] = []
+  private static readonly MAX_STDERR_LINES = 20
+
+  private recordStderr(msg: string): void {
+    if (!msg) return
+    this.recentStderr.push(...msg.split('\n').filter(Boolean))
+    if (this.recentStderr.length > PythonBridge.MAX_STDERR_LINES) {
+      this.recentStderr = this.recentStderr.slice(-PythonBridge.MAX_STDERR_LINES)
+    }
+  }
 
   setWindowGetter(fn: () => BrowserWindow | null): void {
     this.getWindow = fn
@@ -45,6 +58,7 @@ export class PythonBridge {
     console.log('[PythonBridge] Starting FastAPI at', apiDir)
     console.log('[PythonBridge] Python executable:', pythonExecutable)
 
+    this.recentStderr = []
     await this.killProcessOnPort()
 
     this.process = spawn(pythonExecutable, ['-m', 'uvicorn', 'main:app', '--host', API_HOST, '--port', String(API_PORT)], {
@@ -79,6 +93,7 @@ export class PythonBridge {
       const msg = data.toString().trim()
       console.error('[FastAPI]', msg)
       logger.python(`[stderr] ${msg}`)
+      this.recordStderr(msg)
       this.emitTqdmLog(msg)
     })
 
@@ -177,7 +192,14 @@ export class PythonBridge {
 
   private async waitUntilReady(maxRetries = 180, delayMs = 500): Promise<void> {
     for (let i = 0; i < maxRetries; i++) {
-      if (!this.process) throw new Error('FastAPI process exited unexpectedly during startup')
+      if (!this.process) {
+        const detail = this.recentStderr.slice(-5).join('\n')
+        throw new Error(
+          detail
+            ? `FastAPI process exited unexpectedly during startup:\n${detail}`
+            : 'FastAPI process exited unexpectedly during startup'
+        )
+      }
       try {
         await axios.get(`${API_BASE_URL}/health`, { timeout: 2000 })
         this.ready = true
